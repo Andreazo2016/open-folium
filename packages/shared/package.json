@@ -1,0 +1,16 @@
+{
+  "name": "@reader-app/shared",
+  "version": "1.0.0",
+  "main": "./src/types/auth.ts",
+  "types": "./src/types/auth.ts",
+  "exports": {
+    ".": "./src/types/auth.ts",
+    "./types/auth": "./src/types/auth.ts"
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^5"
+  }
+}

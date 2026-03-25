@@ -1,0 +1,121 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                String   @id @default(uuid())
+  name              String
+  email             String   @unique
+  passwordHash      String
+  telegramChatId    String?
+  notifConfig       String   @default("{\"enabled\":false,\"cron\":\"0 8 * * *\",\"count\":3}")
+  createdAt         DateTime @default(now())
+
+  books             Book[]
+  highlights        Highlight[]
+  decks             Deck[]
+  reviewLogs        ReviewLog[]
+  notificationLogs  NotificationLog[]
+  readingProgress   ReadingProgress[]
+}
+
+model Book {
+  id          String   @id @default(uuid())
+  userId      String
+  title       String
+  author      String?
+  fileType    String
+  filePath    String
+  coverPath   String?
+  totalPages  Int?
+  createdAt   DateTime @default(now())
+
+  user            User              @relation(fields: [userId], references: [id])
+  highlights      Highlight[]
+  readingProgress ReadingProgress[]
+}
+
+model ReadingProgress {
+  id        String   @id @default(uuid())
+  userId    String
+  bookId    String
+  position  String?
+  page      Int?
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+  book Book @relation(fields: [bookId], references: [id])
+
+  @@unique([userId, bookId])
+}
+
+model Highlight {
+  id          String   @id @default(uuid())
+  userId      String
+  bookId      String
+  content     String
+  color       String   @default("yellow")
+  positionCfi String?
+  page        Int?
+  note        String?
+  createdAt   DateTime @default(now())
+
+  user  User   @relation(fields: [userId], references: [id])
+  book  Book   @relation(fields: [bookId], references: [id])
+  cards Card[]
+}
+
+model Deck {
+  id          String   @id @default(uuid())
+  userId      String
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+
+  user  User   @relation(fields: [userId], references: [id])
+  cards Card[]
+}
+
+model Card {
+  id          String   @id @default(uuid())
+  deckId      String
+  highlightId String?
+  front       String
+  back        String
+  easiness    Float    @default(2.5)
+  interval    Int      @default(1)
+  repetitions Int      @default(0)
+  nextReview  DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  deck       Deck       @relation(fields: [deckId], references: [id])
+  highlight  Highlight? @relation(fields: [highlightId], references: [id])
+  reviewLogs ReviewLog[]
+}
+
+model ReviewLog {
+  id         String   @id @default(uuid())
+  cardId     String
+  userId     String
+  quality    Int
+  intervalUsed Int
+  reviewedAt DateTime @default(now())
+
+  card Card @relation(fields: [cardId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+}
+
+model NotificationLog {
+  id          String   @id @default(uuid())
+  userId      String
+  highlightId String
+  sentAt      DateTime @default(now())
+  channel     String   @default("telegram")
+
+  user User @relation(fields: [userId], references: [id])
+}

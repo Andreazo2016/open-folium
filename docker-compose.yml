@@ -1,0 +1,22 @@
+services:
+  api:
+    build: ./apps/api
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data/db:/app/data
+      - ./data/uploads:/app/uploads
+    environment:
+      DATABASE_URL: file:/app/data/reader.db
+      JWT_SECRET: ${JWT_SECRET}
+      REFRESH_SECRET: ${REFRESH_SECRET}
+      PORT: "3000"
+    restart: unless-stopped
+
+  web:
+    build: ./apps/web
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+    restart: unless-stopped

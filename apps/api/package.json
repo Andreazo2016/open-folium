@@ -1,0 +1,37 @@
+{
+  "name": "api",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate deploy"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^9",
+    "@fastify/cors": "^9",
+    "@fastify/jwt": "^8",
+    "@fastify/multipart": "^7.7.3",
+    "@fastify/static": "^9.0.0",
+    "@prisma/client": "^5",
+    "bcrypt": "^5",
+    "epub2": "^3.0.2",
+    "fastify": "^4",
+    "fastify-plugin": "^4",
+    "jsonwebtoken": "^9",
+    "pdf-parse": "^2.4.5",
+    "zod": "^3"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5",
+    "@types/jsonwebtoken": "^9",
+    "@types/node": "^20",
+    "@types/pdf-parse": "^1.1.5",
+    "pino-pretty": "^13",
+    "prisma": "^5",
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}
