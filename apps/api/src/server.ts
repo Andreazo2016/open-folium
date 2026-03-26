@@ -5,6 +5,7 @@ import jwtPlugin from './plugins/jwt';
 import cookiePlugin from './plugins/cookie';
 import authRoutes from './routes/auth';
 import booksRoutes from './routes/books';
+import highlightsRoutes from './routes/highlights';
 
 const fastify = Fastify({
   logger: {
@@ -31,6 +32,7 @@ async function bootstrap() {
   // Register routes
   await fastify.register(authRoutes);
   await fastify.register(booksRoutes);
+  await fastify.register(highlightsRoutes);
 
   const port = parseInt(process.env.PORT || '3000', 10);
   const host = process.env.HOST || '0.0.0.0';

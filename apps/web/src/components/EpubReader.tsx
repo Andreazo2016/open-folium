@@ -2,23 +2,50 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { ReactReader, ReactReaderStyle } from 'react-reader';
 import { api } from '../lib/api';
 import { useDebouncedSaveProgress } from '../hooks/useReader';
+import { HighlightPopup } from './HighlightPopup';
+import type { HighlightColor, HighlightDto } from '../types/highlights';
 
 interface Props {
   bookId: string;
+  highlights?: HighlightDto[];
+  onHighlightCreate?: (data: {
+    content: string;
+    color: HighlightColor;
+    positionCfi: string;
+    note: string;
+  }) => void;
 }
 
-export function EpubReader({ bookId }: Props) {
+interface PendingHighlight {
+  text: string;
+  cfiRange: string;
+  popupX: number;
+  popupY: number;
+}
+
+// SVG fill colors for epub.js annotations
+const EPUB_COLORS: Record<HighlightColor, string> = {
+  yellow: 'rgba(253, 224, 71, 0.5)',
+  blue:   'rgba(147, 197, 253, 0.5)',
+  green:  'rgba(134, 239, 172, 0.5)',
+  pink:   'rgba(249, 168, 212, 0.5)',
+};
+
+export function EpubReader({ bookId, highlights, onHighlightCreate }: Props) {
   const [epubBuffer, setEpubBuffer] = useState<ArrayBuffer | null>(null);
   const [location, setLocation] = useState<string | null>(null);
   const [fontSize, setFontSize] = useState(100);
   const [error, setError] = useState<string | null>(null);
   const [fileLoading, setFileLoading] = useState(true);
+  const [pendingHighlight, setPendingHighlight] = useState<PendingHighlight | null>(null);
+  const [renditionReady, setRenditionReady] = useState(false);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const renditionRef = useRef<any>(null);
+  // Track which highlight ids have been applied to avoid duplicate annotations
+  const appliedRef = useRef<Map<string, string>>(new Map()); // id → cfiRange
 
   const { progress, loaded: progressLoaded, saveProgress } = useDebouncedSaveProgress(bookId);
 
-  // Fetch EPUB as ArrayBuffer (authenticated) — avoids blob URL issues with epub.js
   useEffect(() => {
     api
       .get(`/books/${bookId}/file`, { responseType: 'arraybuffer' })
@@ -32,29 +59,119 @@ export function EpubReader({ bookId }: Props) {
       });
   }, [bookId]);
 
-  // Set initial location once progress is loaded
   useEffect(() => {
     if (progressLoaded) {
       setLocation(progress?.position ?? null);
     }
   }, [progressLoaded, progress]);
 
-  // Apply font size changes to existing rendition without re-initializing
   useEffect(() => {
     if (renditionRef.current) {
       renditionRef.current.themes.fontSize(`${fontSize}%`);
     }
   }, [fontSize]);
 
+  // Apply / sync visual annotations whenever highlights list or rendition readiness changes
+  useEffect(() => {
+    if (!renditionReady || !renditionRef.current) return;
+    const r = renditionRef.current;
+
+    const currentIds = new Set(highlights?.map((h) => h.id) ?? []);
+
+    // Remove annotations for deleted highlights
+    for (const [id, cfi] of appliedRef.current) {
+      if (!currentIds.has(id)) {
+        try { r.annotations.remove(cfi, 'highlight'); } catch { /* ignore */ }
+        appliedRef.current.delete(id);
+      }
+    }
+
+    // Add annotations for new highlights
+    for (const h of highlights ?? []) {
+      if (!h.positionCfi || appliedRef.current.has(h.id)) continue;
+      try {
+        r.annotations.add(
+          'highlight',
+          h.positionCfi,
+          {},
+          undefined,
+          'epub-hl',
+          { fill: EPUB_COLORS[h.color as HighlightColor] ?? EPUB_COLORS.yellow },
+        );
+        appliedRef.current.set(h.id, h.positionCfi);
+      } catch { /* ignore invalid CFI */ }
+    }
+  }, [renditionReady, highlights]);
+
   const handleGetRendition = useCallback((rendition: unknown) => {
     renditionRef.current = rendition;
-    (rendition as { themes: { fontSize: (s: string) => void } }).themes.fontSize(`${fontSize}%`);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const r = rendition as any;
+    r.themes.fontSize(`${fontSize}%`);
+    setRenditionReady(true);
+
+    r.on('selected', (cfiRange: string, contents: unknown) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const selection = (contents as any)?.window?.getSelection?.();
+      const text = selection?.toString().trim();
+      if (!text || text.length < 2) return;
+
+      let x = window.innerWidth / 2;
+      let y = window.innerHeight / 2;
+      try {
+        const range = selection.getRangeAt(0);
+        const rect = range.getBoundingClientRect();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const iframe = (contents as any)?.document?.defaultView?.frameElement as HTMLIFrameElement | null;
+        const iframeRect = iframe?.getBoundingClientRect?.() ?? { left: 0, top: 0 };
+        x = iframeRect.left + rect.left + rect.width / 2;
+        y = iframeRect.top + rect.bottom;
+      } catch { /* use center defaults */ }
+
+      setPendingHighlight({ text, cfiRange, popupX: x, popupY: y });
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // intentionally empty — only called once on mount
+  }, []); // called once on mount — fontSize initial value is fine here
 
   function handleLocationChange(loc: string) {
     setLocation(loc);
     saveProgress({ position: loc });
+  }
+
+  // Use a ref so handleHighlightSave always has current onHighlightCreate
+  const onHighlightCreateRef = useRef(onHighlightCreate);
+  onHighlightCreateRef.current = onHighlightCreate;
+
+  function handleHighlightSave(color: HighlightColor, note: string) {
+    if (!pendingHighlight) return;
+
+    onHighlightCreateRef.current?.({
+      content: pendingHighlight.text,
+      color,
+      positionCfi: pendingHighlight.cfiRange,
+      note,
+    });
+
+    // Apply visual annotation immediately (optimistic) — the useEffect will
+    // also apply it once the query refetches, but this gives instant feedback.
+    if (renditionRef.current) {
+      try {
+        renditionRef.current.annotations.add(
+          'highlight',
+          pendingHighlight.cfiRange,
+          {},
+          undefined,
+          'epub-hl',
+          { fill: EPUB_COLORS[color] },
+        );
+      } catch { /* ignore */ }
+    }
+
+    setPendingHighlight(null);
+  }
+
+  function handleHighlightCancel() {
+    setPendingHighlight(null);
   }
 
   const isLoading = fileLoading || !progressLoaded;
@@ -101,9 +218,7 @@ export function EpubReader({ bookId }: Props) {
           url={epubBuffer}
           location={location}
           locationChanged={handleLocationChange}
-          readerStyles={{
-            ...ReactReaderStyle,
-          }}
+          readerStyles={{ ...ReactReaderStyle }}
           getRendition={handleGetRendition}
           errorView={
             <div className="flex items-center justify-center h-full text-red-500 p-4 text-center">
@@ -112,6 +227,15 @@ export function EpubReader({ bookId }: Props) {
           }
         />
       </div>
+
+      {pendingHighlight && (
+        <HighlightPopup
+          position={{ x: pendingHighlight.popupX, y: pendingHighlight.popupY }}
+          selectedText={pendingHighlight.text}
+          onSave={handleHighlightSave}
+          onCancel={handleHighlightCancel}
+        />
+      )}
     </div>
   );
 }

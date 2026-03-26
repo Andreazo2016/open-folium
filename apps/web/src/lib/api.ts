@@ -1,6 +1,7 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
 import { useAuthStore } from '../store/auth';
 import type { BookDto, ReadingProgressDto } from '../types/books';
+import type { HighlightColor, HighlightDto } from '../types/highlights';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
 
@@ -118,6 +119,22 @@ export const booksApi = {
 
   saveProgress: (id: string, data: { page?: number; position?: string }) =>
     api.patch<{ progress: ReadingProgressDto }>(`/books/${id}/progress`, data),
+};
+
+// Highlights API helpers
+export const highlightsApi = {
+  list: (bookId: string) =>
+    api.get<{ highlights: HighlightDto[] }>(`/books/${bookId}/highlights`),
+
+  create: (
+    bookId: string,
+    data: { content: string; color?: HighlightColor; page?: number; positionCfi?: string; note?: string }
+  ) => api.post<{ highlight: HighlightDto }>(`/books/${bookId}/highlights`, data),
+
+  update: (id: string, data: { note?: string | null; color?: HighlightColor }) =>
+    api.patch<{ highlight: HighlightDto }>(`/highlights/${id}`, data),
+
+  delete: (id: string) => api.delete(`/highlights/${id}`),
 };
 
 // Auth API helpers
