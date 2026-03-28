@@ -239,6 +239,17 @@ export function PdfReader({ bookId, totalPages, highlights, onHighlightCreate }:
     applyHighlightsToTextLayer(items, pageHighlights);
   }, [highlights, currentPage, rendering]);
 
+  // Keyboard arrow navigation
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'TEXTAREA') return;
+      if (e.key === 'ArrowLeft') goToPage(currentPage - 1);
+      else if (e.key === 'ArrowRight') goToPage(currentPage + 1);
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  });
+
   function goToPage(n: number) {
     const page = Math.max(1, Math.min(n, numPages));
     setCurrentPage(page);

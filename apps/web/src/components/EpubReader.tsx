@@ -133,6 +133,18 @@ export function EpubReader({ bookId, highlights, onHighlightCreate }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // called once on mount — fontSize initial value is fine here
 
+  // Keyboard arrow navigation
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'TEXTAREA') return;
+      if (!renditionRef.current) return;
+      if (e.key === 'ArrowLeft') renditionRef.current.prev();
+      else if (e.key === 'ArrowRight') renditionRef.current.next();
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  });
+
   function handleLocationChange(loc: string) {
     setLocation(loc);
     saveProgress({ position: loc });
