@@ -13,3 +13,14 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
+
+/* PDF text layer — transparent selectable spans on top of canvas */
+.pdf-text-layer {
+  line-height: 1;
+  user-select: text;
+  cursor: text;
+}
+
+.pdf-text-layer span::selection {
+  background-color: rgba(59, 130, 246, 0.35);
+}

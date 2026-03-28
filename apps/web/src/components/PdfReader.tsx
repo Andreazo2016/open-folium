@@ -27,7 +27,12 @@ interface PendingHighlight {
   popupY: number;
 }
 
-// Semi-transparent background colors for PDF text layer spans
+interface TextItemInfo {
+  str: string;
+  hasEOL: boolean;
+  span: HTMLSpanElement;
+}
+
 const PDF_HIGHLIGHT_COLORS: Record<HighlightColor, string> = {
   yellow: 'rgba(253, 224, 71, 0.55)',
   blue:   'rgba(147, 197, 253, 0.55)',
@@ -35,69 +40,79 @@ const PDF_HIGHLIGHT_COLORS: Record<HighlightColor, string> = {
   pink:   'rgba(249, 168, 212, 0.55)',
 };
 
-/**
- * Given the text-layer div and the highlights for the current page,
- * mark spans whose text overlaps with each highlight's content.
- */
+/** Paint saved highlights onto the text layer by matching text content. */
 function applyHighlightsToTextLayer(
-  textLayerDiv: HTMLDivElement,
+  items: TextItemInfo[],
   pageHighlights: HighlightDto[],
 ) {
   if (pageHighlights.length === 0) return;
 
-  const spans = Array.from(textLayerDiv.querySelectorAll<HTMLSpanElement>('span'));
-
-  // Build flat text + per-character span index
+  // Build normalised fullText (single spaces between items) and track spans
   let fullText = '';
-  const spanMap: { span: HTMLSpanElement; start: number; end: number }[] = [];
-  for (const span of spans) {
-    const t = span.textContent ?? '';
-    spanMap.push({ span, start: fullText.length, end: fullText.length + t.length });
+  const itemMap: { item: TextItemInfo; start: number; end: number }[] = [];
+  for (const item of items) {
+    const t = item.str;
+    if (!t) continue;
+    if (fullText.length > 0 && !fullText.endsWith(' ')) fullText += ' ';
+    const start = fullText.length;
     fullText += t;
+    const end = fullText.length;
+    itemMap.push({ item, start, end });
   }
 
-  const lowerFull = fullText.toLowerCase();
+  // Normalise whitespace in the haystack too, building a position map
+  const rawLower = fullText.toLowerCase();
+  // Build a collapsed version (multi-space → single) with index mapping
+  let collapsed = '';
+  const collapsedToRaw: number[] = [];
+  let prevSpace = false;
+  for (let i = 0; i < rawLower.length; i++) {
+    const ch = rawLower[i];
+    const isWs = /\s/.test(ch);
+    if (isWs && prevSpace) continue; // skip extra whitespace
+    collapsed += isWs ? ' ' : ch;
+    collapsedToRaw.push(i);
+    prevSpace = isWs;
+  }
 
   for (const h of pageHighlights) {
-    const needle = h.content.toLowerCase().trim();
+    const needle = h.content.toLowerCase().trim().replace(/\s+/g, ' ');
     if (!needle) continue;
-    const idx = lowerFull.indexOf(needle);
+    const idx = collapsed.indexOf(needle);
     if (idx === -1) continue;
-    const matchEnd = idx + needle.length;
+    // Map collapsed range back to raw range
+    const rawStart = collapsedToRaw[idx];
+    const rawEnd = collapsedToRaw[idx + needle.length - 1] + 1;
     const color = PDF_HIGHLIGHT_COLORS[h.color as HighlightColor] ?? PDF_HIGHLIGHT_COLORS.yellow;
-
-    for (const { span, start, end } of spanMap) {
-      if (end > idx && start < matchEnd) {
-        span.style.backgroundColor = color;
-        span.style.borderRadius = '2px';
+    for (const { item, start, end } of itemMap) {
+      if (end > rawStart && start < rawEnd) {
+        item.span.style.backgroundColor = color;
+        item.span.style.borderRadius = '2px';
       }
     }
   }
 }
 
 export function PdfReader({ bookId, totalPages, highlights, onHighlightCreate }: Props) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const textLayerRef = useRef<HTMLDivElement>(null);
-  const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
-  const pdfDocRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef      = useRef<HTMLCanvasElement>(null);
+  const textLayerRef   = useRef<HTMLDivElement>(null);
+  const renderTaskRef  = useRef<pdfjsLib.RenderTask | null>(null);
+  const pdfDocRef      = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
 
-  const [numPages, setNumPages] = useState(totalPages ?? 0);
+  // Rich text items for the current page (includes DOM span refs)
+  const textItemsRef   = useRef<TextItemInfo[]>([]);
+
+  const [numPages, setNumPages]       = useState(totalPages ?? 0);
   const [currentPage, setCurrentPage] = useState(1);
-  const [scale, setScale] = useState(1.2);
-  const [pageInput, setPageInput] = useState('1');
-  const [loading, setLoading] = useState(true);
-  const [rendering, setRendering] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [scale, setScale]             = useState(1.2);
+  const [pageInput, setPageInput]     = useState('1');
+  const [loading, setLoading]         = useState(true);
+  const [rendering, setRendering]     = useState(false);
+  const [error, setError]             = useState<string | null>(null);
   const [pendingHighlight, setPendingHighlight] = useState<PendingHighlight | null>(null);
-
-  // Keep a ref so renderPage always sees the latest highlights without re-creating the callback
-  const highlightsRef = useRef(highlights);
-  highlightsRef.current = highlights;
 
   const { progress, loaded: progressLoaded, saveProgress } = useDebouncedSaveProgress(bookId);
 
-  // Restore saved page
   useEffect(() => {
     if (progressLoaded && progress?.page) {
       setCurrentPage(progress.page);
@@ -105,44 +120,29 @@ export function PdfReader({ bookId, totalPages, highlights, onHighlightCreate }:
     }
   }, [progressLoaded, progress]);
 
-  // Load the PDF once
   useEffect(() => {
     let cancelled = false;
-
     async function load() {
       setLoading(true);
       setError(null);
-
       try {
-        const response = await api.get(`/books/${bookId}/file`, {
-          responseType: 'arraybuffer',
-        });
-
+        const response = await api.get(`/books/${bookId}/file`, { responseType: 'arraybuffer' });
         if (cancelled) return;
-
         const data = new Uint8Array(response.data as ArrayBuffer);
-        const loadingTask = pdfjsLib.getDocument({ data });
-        const doc = await loadingTask.promise;
-
-        if (cancelled) {
-          doc.destroy();
-          return;
-        }
-
+        const doc = await pdfjsLib.getDocument({ data }).promise;
+        if (cancelled) { doc.destroy(); return; }
         pdfDocRef.current = doc;
         setNumPages(doc.numPages);
         setLoading(false);
       } catch (err) {
         if (!cancelled) {
           console.error('[PdfReader] load error:', err);
-          setError('Não foi possível carregar o PDF. Verifique se o arquivo é válido.');
+          setError('Não foi possível carregar o PDF.');
           setLoading(false);
         }
       }
     }
-
     load();
-
     return () => {
       cancelled = true;
       pdfDocRef.current?.destroy();
@@ -150,7 +150,6 @@ export function PdfReader({ bookId, totalPages, highlights, onHighlightCreate }:
     };
   }, [bookId]);
 
-  // Render a specific page + text layer
   const renderPage = useCallback(async (pageNum: number) => {
     const doc = pdfDocRef.current;
     const canvas = canvasRef.current;
@@ -163,55 +162,58 @@ export function PdfReader({ bookId, totalPages, highlights, onHighlightCreate }:
     }
 
     setRendering(true);
-
     try {
       const page = await doc.getPage(pageNum);
       const viewport = page.getViewport({ scale });
 
-      canvas.width = viewport.width;
+      canvas.width  = viewport.width;
       canvas.height = viewport.height;
-
       const canvasContext = canvas.getContext('2d')!;
-      const renderTask = page.render({ canvas: null, canvasContext, viewport });
+      const renderTask = page.render({ canvas: canvas, canvasContext, viewport });
       renderTaskRef.current = renderTask;
       await renderTask.promise;
       renderTaskRef.current = null;
 
-      // Build text layer
+      // ── Build text layer ────────────────────────────────────────────────
       textLayerDiv.innerHTML = '';
-      textLayerDiv.style.width = `${viewport.width}px`;
+      textLayerDiv.style.width  = `${viewport.width}px`;
       textLayerDiv.style.height = `${viewport.height}px`;
 
       const textContent = await page.getTextContent();
+      const richItems: TextItemInfo[] = [];
 
-      for (const item of textContent.items) {
-        if (!('str' in item) || !item.str) continue;
+      for (const raw of textContent.items) {
+        if (!('str' in raw) || !raw.str) continue;
+        const item = raw as { str: string; hasEOL: boolean; transform: number[]; width: number; height: number };
 
         const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+        const fontSize = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
+        const itemW    = item.width  * Math.abs(tx[0] / (item.transform[0] || 1));
+        const itemH    = fontSize;
+        const itemX    = tx[4];
+        const itemY    = tx[5] - itemH;
+
         const span = document.createElement('span');
-        span.textContent = item.str + (item.hasEOL ? ' ' : '');
+        span.textContent = item.str + (item.hasEOL ? '\n' : '');
         span.style.cssText = [
           'color: transparent',
           'position: absolute',
           'white-space: pre',
-          'cursor: text',
-          'transform-origin: 0% 0%',
-          `left: ${tx[4]}px`,
-          `top: ${tx[5]}px`,
-          `font-size: ${Math.abs(tx[0]) || Math.abs(tx[1])}px`,
-          `transform: matrix(${tx[0]}, ${tx[1]}, ${tx[2]}, ${tx[3]}, 0, 0)`,
+          `left: ${itemX}px`,
+          `top: ${itemY}px`,
+          `width: ${Math.max(itemW, 1)}px`,
+          `height: ${Math.max(itemH, 1)}px`,
+          `font-size: ${fontSize}px`,
+          'overflow: hidden',
         ].join(';');
+
         textLayerDiv.appendChild(span);
+        richItems.push({ str: item.str, hasEOL: item.hasEOL, span });
       }
 
-      // Apply saved highlights for this page
-      const pageHighlights = (highlightsRef.current ?? []).filter(
-        (h) => h.page === pageNum,
-      );
-      applyHighlightsToTextLayer(textLayerDiv, pageHighlights);
+      textItemsRef.current = richItems;
     } catch (err: unknown) {
-      const name = (err as { name?: string })?.name;
-      if (name !== 'RenderingCancelledException') {
+      if ((err as { name?: string })?.name !== 'RenderingCancelledException') {
         console.error('[PdfReader] render error:', err);
       }
     } finally {
@@ -219,79 +221,71 @@ export function PdfReader({ bookId, totalPages, highlights, onHighlightCreate }:
     }
   }, [scale]);
 
-  // Render when page or scale changes
   useEffect(() => {
-    if (!loading && pdfDocRef.current) {
-      renderPage(currentPage);
-    }
+    if (!loading && pdfDocRef.current) renderPage(currentPage);
   }, [loading, currentPage, scale, renderPage]);
 
-  // Re-apply highlights when the highlights list changes (e.g. after new save or delete)
-  // without re-rendering the whole page — just re-paint the text layer
+  // Apply highlights on existing spans whenever highlights change or page finishes rendering.
   useEffect(() => {
-    const textLayerDiv = textLayerRef.current;
-    if (!textLayerDiv || loading || rendering) return;
-
-    // Reset all span backgrounds first
-    for (const span of textLayerDiv.querySelectorAll<HTMLSpanElement>('span')) {
+    if (rendering) return;
+    const items = textItemsRef.current;
+    if (!items.length) return;
+    // Clear previous highlight backgrounds
+    for (const { span } of items) {
       span.style.backgroundColor = '';
       span.style.borderRadius = '';
     }
-
-    const pageHighlights = (highlights ?? []).filter((h) => h.page === currentPage);
-    applyHighlightsToTextLayer(textLayerDiv, pageHighlights);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [highlights, currentPage]);
+    const pageHighlights = (highlights ?? []).filter(h => h.page === currentPage);
+    applyHighlightsToTextLayer(items, pageHighlights);
+  }, [highlights, currentPage, rendering]);
 
   function goToPage(n: number) {
     const page = Math.max(1, Math.min(n, numPages));
     setCurrentPage(page);
     setPageInput(String(page));
     saveProgress({ page });
+    window.getSelection()?.removeAllRanges();
     setPendingHighlight(null);
   }
 
-  function handleMouseUp(e: React.MouseEvent) {
-    if (!onHighlightCreate) return;
-    const selection = window.getSelection();
-    const text = selection?.toString().trim();
-    if (!text || text.length < 2) return;
+  // ── Native text selection ────────────────────────────────────────────────
 
-    setPendingHighlight({
-      text,
-      page: currentPage,
-      popupX: e.clientX,
-      popupY: e.clientY,
-    });
+  function handleTextLayerMouseUp(e: React.MouseEvent) {
+    if (!onHighlightCreate || rendering) return;
+
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) return;
+
+    const text = selection.toString().replace(/\s+/g, ' ').trim();
+    if (text.length < 2) return;
+
+    // Make sure the selection is inside the text layer
+    const textLayer = textLayerRef.current;
+    if (
+      !textLayer ||
+      !selection.anchorNode ||
+      !selection.focusNode ||
+      !textLayer.contains(selection.anchorNode) ||
+      !textLayer.contains(selection.focusNode)
+    ) return;
+
+    setPendingHighlight({ text, page: currentPage, popupX: e.clientX, popupY: e.clientY });
   }
 
   function handleHighlightSave(color: HighlightColor, note: string) {
     if (!pendingHighlight) return;
-    onHighlightCreate?.({
-      content: pendingHighlight.text,
-      color,
-      page: pendingHighlight.page,
-      note,
-    });
-
-    // Optimistic: apply immediately to the text layer without waiting for refetch
-    const textLayerDiv = textLayerRef.current;
-    if (textLayerDiv) {
-      const fake: HighlightDto = {
-        id: '__optimistic__',
-        userId: '',
-        bookId,
-        content: pendingHighlight.text,
-        color,
-        page: pendingHighlight.page,
-        positionCfi: null,
-        note: note || null,
-        createdAt: new Date().toISOString(),
-      };
-      applyHighlightsToTextLayer(textLayerDiv, [fake]);
-    }
+    onHighlightCreate?.({ content: pendingHighlight.text, color, page: pendingHighlight.page, note });
 
     window.getSelection()?.removeAllRanges();
+
+    // Optimistic paint
+    const fake: HighlightDto = {
+      id: '__opt__', userId: '', bookId,
+      content: pendingHighlight.text, color,
+      page: pendingHighlight.page, positionCfi: null,
+      note: note || null, createdAt: new Date().toISOString(),
+    };
+    applyHighlightsToTextLayer(textItemsRef.current, [fake]);
     setPendingHighlight(null);
   }
 
@@ -317,61 +311,37 @@ export function PdfReader({ bookId, totalPages, highlights, onHighlightCreate }:
       {/* Toolbar */}
       <div className="flex items-center justify-between bg-gray-800 text-white px-4 py-2 gap-4 flex-shrink-0">
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => goToPage(currentPage - 1)}
+          <button onClick={() => goToPage(currentPage - 1)}
             disabled={currentPage <= 1 || loading || rendering}
-            className="px-3 py-1.5 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-sm"
-          >
+            className="px-3 py-1.5 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-sm">
             ← Ant.
           </button>
-
-          <form
-            onSubmit={(e) => { e.preventDefault(); const n = parseInt(pageInput, 10); if (!isNaN(n)) goToPage(n); }}
-            className="flex items-center gap-1.5"
-          >
-            <input
-              type="number"
-              value={pageInput}
-              onChange={(e) => setPageInput(e.target.value)}
-              onBlur={() => { const n = parseInt(pageInput, 10); if (!isNaN(n)) goToPage(n); }}
-              min={1}
-              max={numPages || 1}
-              className="w-14 text-center bg-gray-700 rounded px-1 py-1 text-sm border border-gray-600 focus:outline-none focus:border-blue-400"
-              disabled={loading}
-            />
-            <span className="text-gray-400 text-sm">/ {numPages || '?'}</span>
+          <form onSubmit={(e) => { e.preventDefault(); const n = parseInt(pageInput,10); if(!isNaN(n)) goToPage(n); }}
+            className="flex items-center gap-1.5">
+            <input type="number" value={pageInput}
+              onChange={e => setPageInput(e.target.value)}
+              onBlur={() => { const n = parseInt(pageInput,10); if(!isNaN(n)) goToPage(n); }}
+              min={1} max={numPages||1} disabled={loading}
+              className="w-14 text-center bg-gray-700 rounded px-1 py-1 text-sm border border-gray-600 focus:outline-none focus:border-blue-400" />
+            <span className="text-gray-400 text-sm">/ {numPages||'?'}</span>
           </form>
-
-          <button
-            onClick={() => goToPage(currentPage + 1)}
+          <button onClick={() => goToPage(currentPage + 1)}
             disabled={currentPage >= numPages || loading || rendering}
-            className="px-3 py-1.5 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-sm"
-          >
+            className="px-3 py-1.5 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-sm">
             Próx. →
           </button>
         </div>
-
         <div className="flex items-center gap-1.5">
-          <button
-            onClick={() => setScale((s) => Math.max(0.5, +(s - 0.1).toFixed(1)))}
-            disabled={rendering}
-            className="w-8 h-8 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-lg font-bold"
-          >
-            −
-          </button>
-          <span className="text-sm w-12 text-center">{Math.round(scale * 100)}%</span>
-          <button
-            onClick={() => setScale((s) => Math.min(3.0, +(s + 0.1).toFixed(1)))}
-            disabled={rendering}
-            className="w-8 h-8 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-lg font-bold"
-          >
-            +
-          </button>
+          <button onClick={() => setScale(s => Math.max(0.5, +(s-0.1).toFixed(1)))} disabled={rendering}
+            className="w-8 h-8 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-lg font-bold">−</button>
+          <span className="text-sm w-12 text-center">{Math.round(scale*100)}%</span>
+          <button onClick={() => setScale(s => Math.min(3.0, +(s+0.1).toFixed(1)))} disabled={rendering}
+            className="w-8 h-8 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-lg font-bold">+</button>
         </div>
       </div>
 
-      {/* Content area */}
-      <div ref={containerRef} className="flex-1 overflow-auto" onMouseUp={handleMouseUp}>
+      {/* Content */}
+      <div className="flex-1 overflow-auto">
         {loading ? (
           <div className="flex flex-col items-center justify-center h-full gap-3">
             <div className="animate-spin rounded-full h-10 w-10 border-4 border-gray-400 border-t-blue-500" />
@@ -379,17 +349,16 @@ export function PdfReader({ bookId, totalPages, highlights, onHighlightCreate }:
           </div>
         ) : (
           <div className="flex justify-center py-6 px-4 min-h-full">
-            <div className="relative select-text">
-              <canvas
-                ref={canvasRef}
-                className="shadow-xl bg-white"
-                style={{ display: 'block' }}
-              />
+            <div className="relative">
+              <canvas ref={canvasRef} className="shadow-xl bg-white" style={{ display: 'block' }} />
+
+              {/* Text layer — selectable transparent spans on top of canvas */}
               <div
                 ref={textLayerRef}
-                className="absolute top-0 left-0 overflow-hidden"
-                style={{ userSelect: 'text' }}
+                className="pdf-text-layer absolute top-0 left-0"
+                onMouseUp={handleTextLayerMouseUp}
               />
+
               {rendering && (
                 <div className="absolute inset-0 flex items-center justify-center bg-white/60">
                   <div className="animate-spin rounded-full h-8 w-8 border-4 border-gray-300 border-t-blue-500" />
