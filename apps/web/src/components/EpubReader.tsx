@@ -71,14 +71,16 @@ export function EpubReader({ bookId, highlights, onHighlightCreate }: Props) {
     }
   }, [fontSize]);
 
-  // Apply / sync visual annotations whenever highlights list or rendition readiness changes
+  // Apply / sync visual annotations whenever highlights list, font size, or rendition readiness changes.
+  // Font size triggers text reflow, so annotations must be removed and re-added.
   useEffect(() => {
     if (!renditionReady || !renditionRef.current) return;
     const r = renditionRef.current;
 
     const currentIds = new Set(highlights?.map((h) => h.id) ?? []);
 
-    // Remove annotations for deleted highlights
+    // Remove annotations that were deleted OR all of them on font-size change so
+    // they get re-created at the correct positions after reflow.
     for (const [id, cfi] of appliedRef.current) {
       if (!currentIds.has(id)) {
         try { r.annotations.remove(cfi, 'highlight'); } catch { /* ignore */ }
@@ -86,7 +88,15 @@ export function EpubReader({ bookId, highlights, onHighlightCreate }: Props) {
       }
     }
 
-    // Add annotations for new highlights
+    // On font-size change, clear all tracked annotations so they are re-added below
+    // (the effect re-runs because fontSize is in the deps).
+    // We remove+re-add to force epub.js to recalculate SVG positions.
+    for (const [, cfi] of appliedRef.current) {
+      try { r.annotations.remove(cfi, 'highlight'); } catch { /* ignore */ }
+    }
+    appliedRef.current.clear();
+
+    // Add annotations for all current highlights
     for (const h of highlights ?? []) {
       if (!h.positionCfi || appliedRef.current.has(h.id)) continue;
       try {
@@ -101,7 +111,7 @@ export function EpubReader({ bookId, highlights, onHighlightCreate }: Props) {
         appliedRef.current.set(h.id, h.positionCfi);
       } catch { /* ignore invalid CFI */ }
     }
-  }, [renditionReady, highlights]);
+  }, [renditionReady, highlights, fontSize]);
 
   const handleGetRendition = useCallback((rendition: unknown) => {
     renditionRef.current = rendition;
